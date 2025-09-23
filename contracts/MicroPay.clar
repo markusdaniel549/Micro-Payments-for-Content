@@ -12,6 +12,8 @@
 (define-constant err-unauthorized (err u104))
 (define-constant err-invalid-amount (err u105))
 (define-constant err-no-balance (err u106))
+(define-constant err-invalid-subscription (err u107))
+(define-constant err-no-active-subscription (err u108))
 
 (define-constant min-payment-amount u1000)
 (define-constant max-payment-amount u1000000)
@@ -64,6 +66,39 @@
 )
 
 (define-data-var next-payment-id uint u1)
+(define-data-var next-subscription-id uint u1)
+
+(define-map subscription-plans
+  { creator: principal }
+  {
+    monthly-price: uint,
+    duration-blocks: uint,
+    is-active: bool,
+    total-subscribers: uint,
+    created-at: uint
+  }
+)
+
+(define-map user-subscriptions
+  { subscriber: principal, creator: principal }
+  {
+    expires-at: uint,
+    subscription-id: uint,
+    auto-renew: bool,
+    created-at: uint
+  }
+)
+
+(define-map subscription-history
+  { subscription-id: uint }
+  {
+    subscriber: principal,
+    creator: principal,
+    amount: uint,
+    duration-blocks: uint,
+    timestamp: uint
+  }
+)
 
 ;; public functions
 (define-public (register-content (title (string-ascii 100)) (payment-amount uint))
@@ -113,16 +148,47 @@
       (content-info (unwrap! (map-get? content-registry { content-id: content-id }) err-not-found))
       (payment-amount (get payment-amount content-info))
       (creator (get creator content-info))
-      (platform-fee (/ (* payment-amount platform-fee-percentage) u100))
-      (creator-payment (- payment-amount platform-fee))
       (current-block burn-block-height)
-      (payment-id (var-get next-payment-id))
+      (subscription-info (map-get? user-subscriptions { subscriber: viewer, creator: creator }))
     )
     (asserts! (not (var-get is-paused)) err-unauthorized)
     (asserts! (get is-active content-info) err-not-found)
-    (asserts! (>= (stx-get-balance viewer) payment-amount) err-insufficient-payment)
     
-    (try! (stx-transfer? creator-payment viewer creator))
+    (if (and (is-some subscription-info) (> (get expires-at (unwrap-panic subscription-info)) current-block))
+      (begin
+        (map-set content-registry
+          { content-id: content-id }
+          (merge content-info {
+            total-views: (+ (get total-views content-info) u1)
+          })
+        )
+        
+        (match (map-get? content-views { viewer: viewer, content-id: content-id })
+          existing-view (map-set content-views
+            { viewer: viewer, content-id: content-id }
+            {
+              view-count: (+ (get view-count existing-view) u1),
+              last-viewed: current-block
+            })
+          (map-set content-views
+            { viewer: viewer, content-id: content-id }
+            {
+              view-count: u1,
+              last-viewed: current-block
+            })
+        )
+        
+        (ok true)
+      )
+      (let
+        (
+          (platform-fee (/ (* payment-amount platform-fee-percentage) u100))
+          (creator-payment (- payment-amount platform-fee))
+          (payment-id (var-get next-payment-id))
+        )
+        (asserts! (>= (stx-get-balance viewer) payment-amount) err-insufficient-payment)
+        
+        (try! (stx-transfer? creator-payment viewer creator))
     (var-set platform-balance (+ (var-get platform-balance) platform-fee))
     
     (map-set content-registry
@@ -168,9 +234,11 @@
       }
     )
     
-    (var-set next-payment-id (+ payment-id u1))
-    
-    (ok true)
+        (var-set next-payment-id (+ payment-id u1))
+        
+        (ok true)
+      )
+    )
   )
 )
 
@@ -244,6 +312,109 @@
   )
 )
 
+(define-public (create-subscription-plan (monthly-price uint) (duration-blocks uint))
+  (let
+    (
+      (creator tx-sender)
+      (current-block burn-block-height)
+    )
+    (asserts! (not (var-get is-paused)) err-unauthorized)
+    (asserts! (>= monthly-price min-payment-amount) err-invalid-amount)
+    (asserts! (<= monthly-price max-payment-amount) err-invalid-amount)
+    (asserts! (> duration-blocks u0) err-invalid-subscription)
+    
+    (map-set subscription-plans
+      { creator: creator }
+      {
+        monthly-price: monthly-price,
+        duration-blocks: duration-blocks,
+        is-active: true,
+        total-subscribers: u0,
+        created-at: current-block
+      }
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (toggle-subscription-plan)
+  (let
+    (
+      (creator tx-sender)
+      (plan-info (unwrap! (map-get? subscription-plans { creator: creator }) err-not-found))
+    )
+    (map-set subscription-plans
+      { creator: creator }
+      (merge plan-info { is-active: (not (get is-active plan-info)) })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (subscribe-to-creator (creator principal))
+  (let
+    (
+      (subscriber tx-sender)
+      (plan-info (unwrap! (map-get? subscription-plans { creator: creator }) err-not-found))
+      (monthly-price (get monthly-price plan-info))
+      (duration-blocks (get duration-blocks plan-info))
+      (platform-fee (/ (* monthly-price platform-fee-percentage) u100))
+      (creator-payment (- monthly-price platform-fee))
+      (current-block burn-block-height)
+      (subscription-id (var-get next-subscription-id))
+      (current-expiry (default-to u0 (get expires-at (map-get? user-subscriptions { subscriber: subscriber, creator: creator }))))
+      (new-expiry (+ (if (> current-expiry current-block) current-expiry current-block) duration-blocks))
+    )
+    (asserts! (not (var-get is-paused)) err-unauthorized)
+    (asserts! (get is-active plan-info) err-invalid-subscription)
+    (asserts! (>= (stx-get-balance subscriber) monthly-price) err-insufficient-payment)
+    
+    (try! (stx-transfer? creator-payment subscriber creator))
+    (var-set platform-balance (+ (var-get platform-balance) platform-fee))
+    
+    (match (map-get? creator-balances { creator: creator })
+      existing-balance (map-set creator-balances
+        { creator: creator }
+        { balance: (+ (get balance existing-balance) creator-payment) })
+      (map-set creator-balances
+        { creator: creator }
+        { balance: creator-payment })
+    )
+    
+    (map-set subscription-plans
+      { creator: creator }
+      (merge plan-info { total-subscribers: (+ (get total-subscribers plan-info) u1) })
+    )
+    
+    (map-set user-subscriptions
+      { subscriber: subscriber, creator: creator }
+      {
+        expires-at: new-expiry,
+        subscription-id: subscription-id,
+        auto-renew: false,
+        created-at: current-block
+      }
+    )
+    
+    (map-set subscription-history
+      { subscription-id: subscription-id }
+      {
+        subscriber: subscriber,
+        creator: creator,
+        amount: creator-payment,
+        duration-blocks: duration-blocks,
+        timestamp: current-block
+      }
+    )
+    
+    (var-set next-subscription-id (+ subscription-id u1))
+    
+    (ok subscription-id)
+  )
+)
+
 (define-public (pause-contract)
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
@@ -314,4 +485,30 @@
 
 (define-read-only (get-contract-owner)
   contract-owner
+)
+
+(define-read-only (get-subscription-plan (creator principal))
+  (map-get? subscription-plans { creator: creator })
+)
+
+(define-read-only (get-user-subscription (subscriber principal) (creator principal))
+  (map-get? user-subscriptions { subscriber: subscriber, creator: creator })
+)
+
+(define-read-only (is-subscription-active (subscriber principal) (creator principal))
+  (match (map-get? user-subscriptions { subscriber: subscriber, creator: creator })
+    subscription-info (> (get expires-at subscription-info) burn-block-height)
+    false
+  )
+)
+
+(define-read-only (get-subscription-history (subscription-id uint))
+  (map-get? subscription-history { subscription-id: subscription-id })
+)
+
+(define-read-only (get-subscription-expiry (subscriber principal) (creator principal))
+  (match (map-get? user-subscriptions { subscriber: subscriber, creator: creator })
+    subscription-info (some (get expires-at subscription-info))
+    none
+  )
 )

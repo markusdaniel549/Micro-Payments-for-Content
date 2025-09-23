@@ -15,6 +15,7 @@ MicroPay is a Clarity smart contract that revolutionizes content monetization by
 - ⚡ **Instant Withdrawals** - Creators can withdraw earnings anytime
 - 🔒 **Secure Platform** - Built-in security features and owner controls
 - 📈 **Low Fees** - Only 5% platform fee on transactions
+- 📅 **Subscription Plans** - Time-based unlimited access to creator content
 
 ## 🛠️ Contract Functions
 
@@ -44,7 +45,7 @@ Modify content pricing:
 ### 💳 Payment System
 
 #### `pay-for-content`
-Pay to view content:
+Pay to view content (bypassed if active subscription exists):
 ```clarity
 (pay-for-content u1)
 ```
@@ -54,6 +55,29 @@ Automatically transfers payment to creator and platform fee to contract.
 Withdraw accumulated earnings:
 ```clarity
 (withdraw-earnings)
+```
+
+### 📅 Subscription Management
+
+#### `create-subscription-plan`
+Create a subscription plan for your content:
+```clarity
+(create-subscription-plan u50000 u4320)
+```
+- **monthly-price**: Subscription cost (1,000 - 1,000,000 microSTX)
+- **duration-blocks**: Subscription duration in blocks (~144 blocks/day)
+
+#### `subscribe-to-creator`
+Subscribe to unlimited access for a creator's content:
+```clarity
+(subscribe-to-creator 'SP1CREATOR...)
+```
+Provides unlimited content access during subscription period.
+
+#### `toggle-subscription-plan`
+Toggle subscription plan availability:
+```clarity
+(toggle-subscription-plan)
 ```
 
 ### 📊 Read Functions
@@ -76,6 +100,24 @@ View platform statistics:
 (get-platform-stats)
 ```
 
+#### `get-subscription-plan`
+Get creator's subscription plan details:
+```clarity
+(get-subscription-plan 'SP1CREATOR...)
+```
+
+#### `is-subscription-active`
+Check if user has active subscription to creator:
+```clarity
+(is-subscription-active 'SP1USER... 'SP1CREATOR...)
+```
+
+#### `get-subscription-expiry`
+Get subscription expiration block:
+```clarity
+(get-subscription-expiry 'SP1USER... 'SP1CREATOR...)
+```
+
 ## 🚀 Getting Started
 
 ### For Content Creators
@@ -90,21 +132,31 @@ View platform statistics:
    (contract-call? .MicroPay get-creator-balance tx-sender)
    ```
 
-3. **Withdraw Earnings**
+3. **Create Subscription Plan**
+   ```clarity
+   (contract-call? .MicroPay create-subscription-plan u30000 u4320)
+   ```
+
+4. **Withdraw Earnings**
    ```clarity
    (contract-call? .MicroPay withdraw-earnings)
    ```
 
 ### For Content Consumers
 
-1. **View Content**
+1. **Subscribe to Creator**
+   ```clarity
+   (contract-call? .MicroPay subscribe-to-creator 'SP1CREATOR...)
+   ```
+
+2. **View Content (Pay-per-view or Subscription)**
    ```clarity
    (contract-call? .MicroPay pay-for-content u1)
    ```
 
-2. **Check Payment History**
+3. **Check Subscription Status**
    ```clarity
-   (contract-call? .MicroPay get-content-views tx-sender u1)
+   (contract-call? .MicroPay is-subscription-active tx-sender 'SP1CREATOR...)
    ```
 
 ## 📋 Configuration
@@ -122,6 +174,8 @@ View platform statistics:
 - `u104`: Unauthorized access
 - `u105`: Invalid amount
 - `u106`: No balance available
+- `u107`: Invalid subscription parameters
+- `u108`: No active subscription
 
 ## 🔧 Development
 
@@ -189,11 +243,12 @@ The contract maintains several key data structures:
 
 ## 🌟 Use Cases
 
-- 📰 **News Websites** - Pay-per-article reading
-- 🎥 **Video Platforms** - Micro-payments for video content  
-- 📚 **Educational Content** - Monetize tutorials and courses
-- 🎨 **Digital Art** - Sell access to digital galleries
-- 📝 **Blog Platforms** - Premium content monetization
+- 📰 **News Websites** - Pay-per-article reading or monthly subscriptions
+- 🎥 **Video Platforms** - Micro-payments or unlimited streaming subscriptions
+- 📚 **Educational Content** - Course subscriptions and tutorial access
+- 🎨 **Digital Art** - Gallery subscriptions for collectors
+- 📝 **Blog Platforms** - Premium content with subscription tiers
+- 🎵 **Music Platforms** - Artist subscription for exclusive content
 
 ## 🤝 Contributing
 

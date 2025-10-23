@@ -14,16 +14,32 @@
 (define-constant err-no-balance (err u106))
 (define-constant err-invalid-subscription (err u107))
 (define-constant err-no-active-subscription (err u108))
+(define-constant err-invalid-tip (err u109))
 
 (define-constant min-payment-amount u1000)
 (define-constant max-payment-amount u1000000)
 (define-constant platform-fee-percentage u5)
+(define-constant tier-bronze u50000000000)
+(define-constant tier-silver u200000000000)
+(define-constant tier-gold u500000000000)
+(define-constant tier-platinum u1000000000000)
+(define-constant tier-none u0)
+(define-constant tier-bronze-id u1)
+(define-constant tier-silver-id u2)
+(define-constant tier-gold-id u3)
+(define-constant tier-platinum-id u4)
+(define-constant bonus-bronze u5)
+(define-constant bonus-silver u10)
+(define-constant bonus-gold u15)
+(define-constant bonus-platinum u20)
+(define-constant min-tip-amount u100)
 
 ;; data vars
 (define-data-var next-content-id uint u1)
 (define-data-var total-content-count uint u0)
 (define-data-var platform-balance uint u0)
 (define-data-var is-paused bool false)
+(define-data-var next-tip-id uint u1)
 
 ;; data maps
 (define-map content-registry
@@ -98,6 +114,80 @@
     duration-blocks: uint,
     timestamp: uint
   }
+)
+
+(define-map creator-tiers
+  { creator: principal }
+  { tier: uint }
+)
+
+(define-map creator-bonuses
+  { creator: principal }
+  { bonus: uint }
+)
+
+(define-map tip-history
+  { tip-id: uint }
+  {
+    tipper: principal,
+    creator: principal,
+    content-id: uint,
+    amount: uint,
+    timestamp: uint,
+    message: (optional (string-ascii 200))
+  }
+)
+
+(define-map creator-tips-received
+  { creator: principal }
+  { total-tips: uint, tip-count: uint }
+)
+
+(define-map content-tips
+  { content-id: uint }
+  { total-tips: uint, tip-count: uint }
+)
+
+;; private functions
+(define-private (evaluate-tier (creator principal) (total-earned uint))
+  (let
+    (
+      (new-tier
+        (if (>= total-earned tier-platinum)
+          tier-platinum-id
+          (if (>= total-earned tier-gold)
+            tier-gold-id
+            (if (>= total-earned tier-silver)
+              tier-silver-id
+              (if (>= total-earned tier-bronze)
+                tier-bronze-id
+                tier-none)))))
+      (new-bonus
+        (if (is-eq new-tier tier-platinum-id)
+          bonus-platinum
+          (if (is-eq new-tier tier-gold-id)
+            bonus-gold
+            (if (is-eq new-tier tier-silver-id)
+              bonus-silver
+              (if (is-eq new-tier tier-bronze-id)
+                bonus-bronze
+                u0)))))
+    )
+    (map-set creator-tiers { creator: creator } { tier: new-tier })
+    (map-set creator-bonuses { creator: creator } { bonus: new-bonus })
+    new-tier
+  )
+)
+
+(define-private (calculate-fee-with-bonus (base-fee uint) (creator principal))
+  (let
+    (
+      (bonus-info (map-get? creator-bonuses { creator: creator }))
+      (bonus (match bonus-info bonus-data (get bonus bonus-data) u0))
+      (discount (/ (* base-fee bonus) u100))
+    )
+    (- base-fee discount)
+  )
 )
 
 ;; public functions
@@ -182,7 +272,8 @@
       )
       (let
         (
-          (platform-fee (/ (* payment-amount platform-fee-percentage) u100))
+          (base-fee (/ (* payment-amount platform-fee-percentage) u100))
+          (platform-fee (calculate-fee-with-bonus base-fee creator))
           (creator-payment (- payment-amount platform-fee))
           (payment-id (var-get next-payment-id))
         )
@@ -200,12 +291,23 @@
     )
     
     (match (map-get? creator-balances { creator: creator })
-      existing-balance (map-set creator-balances 
-        { creator: creator }
-        { balance: (+ (get balance existing-balance) creator-payment) })
-      (map-set creator-balances 
-        { creator: creator }
-        { balance: creator-payment })
+      existing-balance (begin
+        (let
+          (
+            (new-balance (+ (get balance existing-balance) creator-payment))
+          )
+          (map-set creator-balances 
+            { creator: creator }
+            { balance: new-balance })
+          (evaluate-tier creator new-balance)
+        )
+      )
+      (begin
+        (map-set creator-balances 
+          { creator: creator }
+          { balance: creator-payment })
+        u0
+      )
     )
     
     (match (map-get? content-views { viewer: viewer, content-id: content-id })
@@ -446,6 +548,96 @@
   )
 )
 
+(define-public (tip-creator (content-id uint) (tip-amount uint) (message (optional (string-ascii 200))))
+  (let
+    (
+      (tipper tx-sender)
+      (content-info (unwrap! (map-get? content-registry { content-id: content-id }) err-not-found))
+      (creator (get creator content-info))
+      (current-block burn-block-height)
+      (tip-id (var-get next-tip-id))
+    )
+    (asserts! (not (var-get is-paused)) err-unauthorized)
+    (asserts! (get is-active content-info) err-not-found)
+    (asserts! (>= tip-amount min-tip-amount) err-invalid-tip)
+    (asserts! (>= (stx-get-balance tipper) tip-amount) err-insufficient-payment)
+    
+    (try! (stx-transfer? tip-amount tipper creator))
+    
+    (match (map-get? creator-balances { creator: creator })
+      existing-balance (begin
+        (let
+          (
+            (new-balance (+ (get balance existing-balance) tip-amount))
+          )
+          (map-set creator-balances 
+            { creator: creator }
+            { balance: new-balance })
+          (evaluate-tier creator new-balance)
+        )
+      )
+      (begin
+        (map-set creator-balances 
+          { creator: creator }
+          { balance: tip-amount })
+        u0
+      )
+    )
+    
+    (match (map-get? creator-tips-received { creator: creator })
+      existing-tips (begin
+        (map-set creator-tips-received
+          { creator: creator }
+          {
+            total-tips: (+ (get total-tips existing-tips) tip-amount),
+            tip-count: (+ (get tip-count existing-tips) u1)
+          })
+        true
+      )
+      (begin
+        (map-set creator-tips-received
+          { creator: creator }
+          { total-tips: tip-amount, tip-count: u1 })
+        true
+      )
+    )
+    
+    (match (map-get? content-tips { content-id: content-id })
+      existing-tips (begin
+        (map-set content-tips
+          { content-id: content-id }
+          {
+            total-tips: (+ (get total-tips existing-tips) tip-amount),
+            tip-count: (+ (get tip-count existing-tips) u1)
+          })
+        true
+      )
+      (begin
+        (map-set content-tips
+          { content-id: content-id }
+          { total-tips: tip-amount, tip-count: u1 })
+        true
+      )
+    )
+    
+    (map-set tip-history
+      { tip-id: tip-id }
+      {
+        tipper: tipper,
+        creator: creator,
+        content-id: content-id,
+        amount: tip-amount,
+        timestamp: current-block,
+        message: message
+      }
+    )
+    
+    (var-set next-tip-id (+ tip-id u1))
+    
+    (ok tip-id)
+  )
+)
+
 ;; read only functions
 (define-read-only (get-content-info (content-id uint))
   (map-get? content-registry { content-id: content-id })
@@ -511,4 +703,60 @@
     subscription-info (some (get expires-at subscription-info))
     none
   )
+)
+
+(define-read-only (get-creator-tier (creator principal))
+  (match (map-get? creator-tiers { creator: creator })
+    tier-data (get tier tier-data)
+    tier-none)
+)
+
+(define-read-only (get-creator-bonus (creator principal))
+  (match (map-get? creator-bonuses { creator: creator })
+    bonus-data (get bonus bonus-data)
+    u0)
+)
+
+(define-read-only (get-next-tier-threshold (creator principal))
+  (let
+    (
+      (current-tier (get-creator-tier creator))
+    )
+    (if (is-eq current-tier tier-platinum-id)
+      (ok u0)
+      (if (is-eq current-tier tier-gold-id)
+        (ok tier-platinum)
+        (if (is-eq current-tier tier-silver-id)
+          (ok tier-gold)
+          (if (is-eq current-tier tier-bronze-id)
+            (ok tier-silver)
+            (ok tier-bronze)))))
+  )
+)
+
+(define-read-only (get-tier-info (creator principal))
+  (ok {
+    tier: (get-creator-tier creator),
+    bonus: (get-creator-bonus creator),
+    balance: (get balance (get-creator-balance creator))
+  })
+)
+
+(define-read-only (get-tip-history (tip-id uint))
+  (map-get? tip-history { tip-id: tip-id })
+)
+
+(define-read-only (get-creator-tips (creator principal))
+  (default-to { total-tips: u0, tip-count: u0 } (map-get? creator-tips-received { creator: creator }))
+)
+
+(define-read-only (get-content-tips (content-id uint))
+  (default-to { total-tips: u0, tip-count: u0 } (map-get? content-tips { content-id: content-id }))
+)
+
+(define-read-only (get-tipping-stats)
+  (ok {
+    next-tip-id: (var-get next-tip-id),
+    min-tip-amount: min-tip-amount
+  })
 )
